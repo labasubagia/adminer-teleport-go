@@ -82,6 +82,37 @@ func (d *Database) ToComposeService() map[string]any {
 	}
 }
 
+// RunProxyTunnel starts the `tsh proxy db --tunnel` subprocess for this database.
+// It builds the arguments from the database fields and delegates to
+// `runLoggedCmd`, which ties the subprocess lifetime to the provided
+// context (so cancellation will kill the child process).
+func (d *Database) RunProxyTunnel(ctx context.Context, outputDir string) error {
+	args := []string{"proxy", "db", "--tunnel", fmt.Sprintf("--port=%d", d.HiddenPort()), "--db-user=" + d.DBUser}
+	if d.DBName != "" {
+		args = append(args, "--db-name="+d.DBName)
+	}
+	args = append(args, d.Cluster)
+	return runLoggedCmd(ctx, d.ProxyTunnelLogPath(), "tsh", args)
+}
+
+// RunSocat starts a socat bridge for this database, forwarding the
+// public BridgePort to the hidden port used by the tsh tunnel.
+func (d *Database) RunSocat(ctx context.Context, outputDir string) error {
+	args := []string{
+		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=0.0.0.0", d.BridgePort),
+		fmt.Sprintf("TCP:127.0.0.1:%d", d.HiddenPort()),
+	}
+	return runLoggedCmd(ctx, d.SocatLogPath(), "socat", args)
+}
+
+func (d *Database) ProxyTunnelLogPath() string {
+	return filepath.Join(DefaultOutputDir, fmt.Sprintf("%s_tsh.log", d.Name))
+}
+
+func (d *Database) SocatLogPath() string {
+	return filepath.Join(DefaultOutputDir, fmt.Sprintf("%s_socat.log", d.Name))
+}
+
 // --- Orchestrator ---
 
 func runOrchestrator(ctx context.Context, selected []Database, outputDir string) (err error) {
@@ -159,23 +190,13 @@ func runOrchestrator(ctx context.Context, selected []Database, outputDir string)
 	g, groupCtx := errgroup.WithContext(childCtx)
 
 	for _, db := range selected {
-		dbRef := db
 
 		// 1. TSH Tunnel
 		g.Go(func() error {
-			args := []string{"proxy", "db", "--tunnel", fmt.Sprintf("--port=%d", dbRef.HiddenPort()), "--db-user=" + dbRef.DBUser}
-			if dbRef.DBName != "" {
-				args = append(args, "--db-name="+dbRef.DBName)
-			}
-			args = append(args, dbRef.Cluster)
-			// Run the tsh tunnel. If this process exits for any reason
-			// (error or normal exit) we cancel the group so the
-			// other tunnels and subprocesses are stopped and the
-			// orchestrator can perform cleanup.
-			err := runLoggedCmd(groupCtx, outputDir, dbRef.Name+"_tsh", "tsh", args)
+			err := db.RunProxyTunnel(groupCtx, outputDir)
 			if err != nil {
-				fmt.Printf("❌ [%s] TSH error: %v\n", dbRef.Name, err)
-				fmt.Printf("   Check %s.log for details\n", filepath.Join(outputDir, dbRef.Name+"_tsh"))
+				fmt.Printf("❌ [%s] TSH error: %v\n", db.Name, err)
+				fmt.Printf("   Check %s.log for details\n", filepath.Join(outputDir, db.Name+"_tsh"))
 			}
 			cancelGroup()
 			return err
@@ -183,31 +204,31 @@ func runOrchestrator(ctx context.Context, selected []Database, outputDir string)
 
 		// 2. SOCAT Bridge (Binding to 0.0.0.0 for container access)
 		g.Go(func() error {
-			args := []string{
-				fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=0.0.0.0", dbRef.BridgePort),
-				fmt.Sprintf("TCP:127.0.0.1:%d", dbRef.HiddenPort()),
-			}
-			fmt.Printf("🔗 [%s] -> %s\n", dbRef.Name, dbRef.AdminerURL())
-			// Run the socat bridge. As with the tsh tunnel, cancel the
-			// group when this subprocess exits so the whole orchestrator
-			// shuts down and Compose is brought down in the defer.
-			err := runLoggedCmd(groupCtx, outputDir, dbRef.Name+"_socat", "socat", args)
+			fmt.Printf("🔗 [%s] -> %s\n", db.Name, db.AdminerURL())
+			err := db.RunSocat(groupCtx, outputDir)
 			if err != nil {
-				fmt.Printf("❌ [%s] SOCAT error: %v\n", dbRef.Name, err)
-				fmt.Printf("   Check %s.log for details\n", filepath.Join(outputDir, dbRef.Name+"_socat"))
+				fmt.Printf("❌ [%s] SOCAT error: %v\n", db.Name, err)
+				fmt.Printf("   Check %s.log for details\n", filepath.Join(outputDir, db.Name+"_socat"))
 			}
 			cancelGroup()
 			return err
 		})
 	}
+	err = g.Wait()
+	if err != nil {
+		return err
+	}
 
-	return g.Wait()
+	return nil
 }
 
-func runLoggedCmd(ctx context.Context, dir, logName, bin string, args []string) (err error) {
+func runLoggedCmd(ctx context.Context, logPath, bin string, args []string) (err error) {
 	// Open a log file for the subprocess. Output (stdout/stderr) is
 	// streamed to this file for debugging.
-	f, _ := os.OpenFile(filepath.Join(dir, logName+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
+	}
 	defer func() {
 		err = f.Close()
 		if err != nil {
