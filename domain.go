@@ -156,6 +156,7 @@ func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Databas
 	}
 
 	var selected []Database
+	invalidNames := []string{}
 	if len(selectedNames) > 0 {
 		lookup := make(map[string]Database)
 		for _, d := range settings.Databases {
@@ -164,10 +165,15 @@ func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Databas
 		for _, name := range selectedNames {
 			if db, ok := lookup[name]; ok {
 				selected = append(selected, db)
+			} else {
+				invalidNames = append(invalidNames, name)
 			}
 		}
 	} else {
 		selected = settings.Databases
+	}
+	if len(invalidNames) > 0 {
+		return nil, fmt.Errorf("the following database names were not found in config: %s", strings.Join(invalidNames, ", "))
 	}
 
 	var errs []string
