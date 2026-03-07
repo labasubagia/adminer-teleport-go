@@ -86,6 +86,8 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 	// killed.
 	g, groupCtx := errgroup.WithContext(childCtx)
 
+	// Spawn a pair of goroutines for each database: one for the proxy tunnel
+	// and one for the socat forwarder. Both are cancelled if either fails.
 	for _, db := range selected {
 		g.Go(func() error {
 			defer cancelGroup()
@@ -108,6 +110,10 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 			return err
 		})
 	}
+
+	// Wait for all goroutines to complete. If any returns an error,
+	// g.Wait() returns immediately and the deferred cancelGroup() above
+	// ensures all other processes are stopped.
 	err = g.Wait()
 	if err != nil {
 		return err
