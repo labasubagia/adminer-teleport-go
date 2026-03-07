@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -15,10 +16,10 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGKILL)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := runOrchestrator(ctx, *configPath, args, *outputDir); err != nil && err != context.Canceled {
+	if err := runOrchestrator(ctx, *configPath, args, *outputDir); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		fmt.Printf("❌ Fatal: %v\n", err)
 		os.Exit(1)
 	}
