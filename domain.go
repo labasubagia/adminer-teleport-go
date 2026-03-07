@@ -15,6 +15,10 @@ type ErrValidation struct {
 	Errs []string
 }
 
+func (e *ErrValidation) Add(msg string) {
+	e.Errs = append(e.Errs, msg)
+}
+
 func (e *ErrValidation) Error() string {
 	return strings.Join(e.Errs, "; ")
 }
@@ -23,6 +27,36 @@ var driverMap = map[string]string{"pgsql": "pgsql", "mysql": "server"}
 
 type Settings struct {
 	Databases []Database `json:"databases"`
+}
+
+func (s *Settings) Validate() error {
+	var ve ErrValidation
+	add := func(s string) { ve.Add(s) }
+
+	// Basic validation for the settings struct itself
+	if len(s.Databases) == 0 {
+		add("at least one database configuration is required")
+	}
+
+	// Check for port duplication across selected databases (bridge, adminer, hidden)
+	portOwners := make(map[int][]string)
+	for _, db := range s.Databases {
+		portOwners[db.BridgePort] = append(portOwners[db.BridgePort], fmt.Sprintf("%s(bridge)", db.Name))
+		portOwners[db.AdminerPort] = append(portOwners[db.AdminerPort], fmt.Sprintf("%s(adminer)", db.Name))
+		hidden := db.HiddenPort()
+		portOwners[hidden] = append(portOwners[hidden], fmt.Sprintf("%s(hidden)", db.Name))
+	}
+	for port, owners := range portOwners {
+		if len(owners) > 1 {
+			add(fmt.Sprintf("port %d is used by multiple databases: %s", port, strings.Join(owners, ", ")))
+		}
+	}
+
+	if len(ve.Errs) > 0 {
+		return &ve
+	}
+
+	return nil
 }
 
 type Database struct {
@@ -79,75 +113,88 @@ func (d *Database) SocatLogPath() string {
 	return filepath.Join(DefaultOutputDir, fmt.Sprintf("%s_socat.log", d.Name))
 }
 
-// RunProxyTunnel and RunSocat are methods that delegate to runLoggedCmd.
+// RunProxyTunnel and RunSocat delegate to runLoggedCmd.
+// If outputDir is non-empty it will be used for the log path instead of DefaultOutputDir.
 func (d *Database) RunProxyTunnel(ctx context.Context, outputDir string) error {
+	logPath := d.ProxyTunnelLogPath()
+	if strings.TrimSpace(outputDir) != "" {
+		logPath = filepath.Join(outputDir, fmt.Sprintf("%s_tsh.log", d.Name))
+	}
 	args := []string{"proxy", "db", "--tunnel", fmt.Sprintf("--port=%d", d.HiddenPort()), "--db-user=" + d.DBUser}
 	if d.DBName != "" {
 		args = append(args, "--db-name="+d.DBName)
 	}
 	args = append(args, d.Cluster)
-	return runLoggedCmd(ctx, d.ProxyTunnelLogPath(), "tsh", args)
+	return runLoggedCmd(ctx, logPath, "tsh", args)
 }
 
 func (d *Database) RunSocat(ctx context.Context, outputDir string) error {
+	logPath := d.SocatLogPath()
+	if strings.TrimSpace(outputDir) != "" {
+		logPath = filepath.Join(outputDir, fmt.Sprintf("%s_socat.log", d.Name))
+	}
 	args := []string{
 		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=0.0.0.0", d.BridgePort),
 		fmt.Sprintf("TCP:127.0.0.1:%d", d.HiddenPort()),
 	}
-	return runLoggedCmd(ctx, d.SocatLogPath(), "socat", args)
+	return runLoggedCmd(ctx, logPath, "socat", args)
 }
 
 // Validate checks that required fields are present, ports are valid,
 // and the DB system is supported.
 func (d *Database) Validate() error {
-
-	errs := []string{}
+	var ve ErrValidation
+	add := func(s string) { ve.Add(s) }
 
 	if strings.TrimSpace(d.Name) == "" {
-		errs = append(errs, "name is required")
+		add("name is required")
 	}
 	if strings.TrimSpace(d.Cluster) == "" {
-		errs = append(errs, "cluster is required")
+		add("cluster is required")
 	}
 	if strings.TrimSpace(d.DBSystem) == "" {
-		errs = append(errs, "db_system is required")
+		add("db_system is required")
 	}
 	if strings.TrimSpace(d.DBUser) == "" {
-		errs = append(errs, "db_user is required")
+		add("db_user is required")
 	}
 	if _, ok := driverMap[d.DBSystem]; !ok {
-		errs = append(errs, fmt.Sprintf("unsupported db_system '%s'", d.DBSystem))
+		add(fmt.Sprintf("unsupported db_system '%s'", d.DBSystem))
 	}
 	if d.BridgePort <= 0 || d.BridgePort > BridgePortUpperBound {
-		errs = append(errs, fmt.Sprintf("bridge_port must be between 1 and %d", BridgePortUpperBound))
+		add(fmt.Sprintf("bridge_port must be between 1 and %d", BridgePortUpperBound))
 	}
 	if d.AdminerPort <= 0 || d.AdminerPort > PortUpperBound {
-		errs = append(errs, fmt.Sprintf("adminer_port must be between 1 and %d", PortUpperBound))
+		add(fmt.Sprintf("adminer_port must be between 1 and %d", PortUpperBound))
 	}
 	if d.AdminerPort == d.BridgePort {
-		errs = append(errs, fmt.Sprintf("adminer_port must differ from bridge_port for %s", d.Name))
+		add(fmt.Sprintf("adminer_port must differ from bridge_port for %s", d.Name))
 	}
-	// Validate hidden port (bridge + offset)
+
 	hidden := d.HiddenPort()
 	if hidden <= 0 || hidden > PortUpperBound {
-		errs = append(errs, fmt.Sprintf("hidden port must be between 1 and %d for %s (got %d). use bridge port between 1-%d", PortUpperBound, d.Name, hidden, BridgePortUpperBound))
+		add(fmt.Sprintf("hidden port must be between 1 and %d for %s (got %d). use bridge port between 1-%d", PortUpperBound, d.Name, hidden, BridgePortUpperBound))
 	}
 	if hidden == d.BridgePort || hidden == d.AdminerPort {
-		errs = append(errs, fmt.Sprintf("hidden port (%d) conflicts with bridge or adminer port for %s", hidden, d.Name))
+		add(fmt.Sprintf("hidden port (%d) conflicts with bridge or adminer port for %s", hidden, d.Name))
 	}
 
 	// Check ports are available on the host
-	if !isPortAvailable(d.BridgePort) {
-		errs = append(errs, fmt.Sprintf("bridge_port %d is already in use on host for %s", d.BridgePort, d.Name))
+	for _, p := range []struct {
+		port int
+		name string
+	}{
+		{d.BridgePort, "bridge_port"},
+		{d.AdminerPort, "adminer_port"},
+		{hidden, "hidden port"},
+	} {
+		if !isPortAvailable(p.port) {
+			add(fmt.Sprintf("%s %d is already in use on host for %s", p.name, p.port, d.Name))
+		}
 	}
-	if !isPortAvailable(d.AdminerPort) {
-		errs = append(errs, fmt.Sprintf("adminer_port %d is already in use on host for %s", d.AdminerPort, d.Name))
-	}
-	if !isPortAvailable(hidden) {
-		errs = append(errs, fmt.Sprintf("hidden port %d is already in use on host for %s", hidden, d.Name))
-	}
-	if len(errs) > 0 {
-		return &ErrValidation{Errs: errs}
+
+	if len(ve.Errs) > 0 {
+		return &ve
 	}
 	return nil
 }
@@ -156,20 +203,16 @@ func (d *Database) Validate() error {
 // filters databases according to selectedNames (if non-empty) and validates
 // each selected database. Returns the selected slice or an aggregated error.
 func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Database, error) {
-	content, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config: %w", err)
-	}
 
-	var settings Settings
-	if err := json.Unmarshal(content, &settings); err != nil {
-		return nil, fmt.Errorf("failed to parse config JSON: %w", err)
+	settings, err := loadSettings(configPath)
+	if err != nil {
+		return nil, err
 	}
 
 	var selected []Database
-	invalidNames := []string{}
+	var missing []string
 	if len(selectedNames) > 0 {
-		lookup := make(map[string]Database)
+		lookup := make(map[string]Database, len(settings.Databases))
 		for _, d := range settings.Databases {
 			lookup[d.Name] = d
 		}
@@ -177,45 +220,45 @@ func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Databas
 			if db, ok := lookup[name]; ok {
 				selected = append(selected, db)
 			} else {
-				invalidNames = append(invalidNames, name)
+				missing = append(missing, name)
 			}
 		}
 	} else {
 		selected = settings.Databases
 	}
-	if len(invalidNames) > 0 {
-		return nil, fmt.Errorf("the following database names were not found in config: %s", strings.Join(invalidNames, ", "))
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("the following database names were not found in config: %s", strings.Join(missing, ", "))
 	}
 
 	var errs []string
 	for i, db := range selected {
 		if err := db.Validate(); err != nil {
-			errVal, ok := err.(*ErrValidation)
-			var errMsg string
-			if ok {
-				errMsg = fmt.Sprintf("\n\t- %s", strings.Join(errVal.Errs, "\n\t- "))
+			if ev, ok := err.(*ErrValidation); ok {
+				errs = append(errs, fmt.Sprintf("json data database-%d %s: \n\t- %s", i, db.Name, strings.Join(ev.Errs, "\n\t- ")))
 			} else {
-				errMsg = err.Error()
+				errs = append(errs, fmt.Sprintf("json data database-%d %s: %s", i, db.Name, err.Error()))
 			}
-			errs = append(errs, fmt.Sprintf("json data database-%d %s: %s", i, db.Name, errMsg))
 		}
 	}
 
-	// Check for port duplication across selected databases (bridge, adminer, hidden)
-	portOwners := make(map[int][]string)
-	for _, db := range selected {
-		portOwners[db.BridgePort] = append(portOwners[db.BridgePort], fmt.Sprintf("%s(bridge)", db.Name))
-		portOwners[db.AdminerPort] = append(portOwners[db.AdminerPort], fmt.Sprintf("%s(adminer)", db.Name))
-		hidden := db.HiddenPort()
-		portOwners[hidden] = append(portOwners[hidden], fmt.Sprintf("%s(hidden)", db.Name))
-	}
-	for port, owners := range portOwners {
-		if len(owners) > 1 {
-			errs = append(errs, fmt.Sprintf("port %d is used by multiple databases: %s", port, strings.Join(owners, ", ")))
-		}
-	}
-	if len(errs) > 0 {
-		return nil, fmt.Errorf("\n- %s", strings.Join(errs, "\n- "))
-	}
 	return selected, nil
+}
+
+func loadSettings(configPath string) (*Settings, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	var s Settings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config JSON: %w", err)
+	}
+	err = s.Validate()
+	if err != nil {
+		if ev, ok := err.(*ErrValidation); ok {
+			return nil, fmt.Errorf("config validation error: \n\t- %s", strings.Join(ev.Errs, "\n\t- "))
+		}
+		return nil, fmt.Errorf("config validation error: %w", err)
+	}
+	return &s, nil
 }
