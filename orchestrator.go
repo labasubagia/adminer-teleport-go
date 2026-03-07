@@ -108,7 +108,7 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 			err := db.RunProxyTunnel(groupCtx, outputDir)
 			if err != nil {
 				fmt.Printf("❌ [%s] TSH error: %v\n", db.Name, err)
-				fmt.Printf("   Check %s for details\n", db.ProxyTunnelLogPath())
+				fmt.Printf("   Check %s for details\n", db.ProxyTunnelLogPath(outputDir))
 			}
 			return err
 		})
@@ -123,7 +123,7 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 			err := db.RunSocat(groupCtx, outputDir)
 			if err != nil {
 				fmt.Printf("❌ [%s] SOCAT error: %v\n", db.Name, err)
-				fmt.Printf("   Check %s for details\n", db.SocatLogPath())
+				fmt.Printf("   Check %s for details\n", db.SocatLogPath(outputDir))
 			}
 			return err
 		})

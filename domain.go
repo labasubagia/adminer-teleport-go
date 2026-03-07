@@ -163,12 +163,6 @@ type Database struct {
 	DBName      string `json:"db_name,omitempty"`
 }
 
-func (d *Database) HiddenPort() int { return d.BridgePort + HiddenPortOffset }
-
-func (d *Database) ServiceName() string {
-	return regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(d.Name, "_")
-}
-
 func (d *Database) AdminerURL() string {
 	driver, ok := driverMap[d.DBSystem]
 	if !ok {
@@ -199,12 +193,8 @@ func (d *Database) ToComposeService() map[string]any {
 	}
 }
 
-func (d *Database) ProxyTunnelLogPath() string {
-	return filepath.Join(DefaultOutputDir, fmt.Sprintf("%s_tsh.log", d.Name))
-}
-
-func (d *Database) SocatLogPath() string {
-	return filepath.Join(DefaultOutputDir, fmt.Sprintf("%s_socat.log", d.Name))
+func (d *Database) ServiceName() string {
+	return regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(d.Name, "_")
 }
 
 // RunProxyTunnel starts a tsh proxy tunnel for the database and logs tsh output.
@@ -224,16 +214,17 @@ func (d *Database) SocatLogPath() string {
 //
 // Returns an error if starting the tsh process or writing logs fails.
 func (d *Database) RunProxyTunnel(ctx context.Context, outputDir string) error {
-	logPath := d.ProxyTunnelLogPath()
-	if strings.TrimSpace(outputDir) != "" {
-		logPath = filepath.Join(outputDir, fmt.Sprintf("%s_tsh.log", d.Name))
-	}
+	logPath := d.ProxyTunnelLogPath(outputDir)
 	args := []string{"proxy", "db", "--tunnel", fmt.Sprintf("--port=%d", d.HiddenPort()), "--db-user=" + d.DBUser}
 	if d.DBName != "" {
 		args = append(args, "--db-name="+d.DBName)
 	}
 	args = append(args, d.Cluster)
 	return runLoggedCmd(ctx, logPath, "tsh", args)
+}
+
+func (d *Database) ProxyTunnelLogPath(outputDir string) string {
+	return filepath.Join(outputDir, fmt.Sprintf("%s_tsh.log", d.Name))
 }
 
 // RunSocat starts a socat process that listens on the database BridgePort on 0.0.0.0
@@ -246,16 +237,19 @@ func (d *Database) RunProxyTunnel(ctx context.Context, outputDir string) error {
 //   - socat bridges that gap by listening on 0.0.0.0 and forwarding requests to 127.0.0.1, allowing containerized
 //     clients to access services bound to the host loopback.
 func (d *Database) RunSocat(ctx context.Context, outputDir string) error {
-	logPath := d.SocatLogPath()
-	if strings.TrimSpace(outputDir) != "" {
-		logPath = filepath.Join(outputDir, fmt.Sprintf("%s_socat.log", d.Name))
-	}
+	logPath := d.SocatLogPath(outputDir)
 	args := []string{
 		fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=0.0.0.0", d.BridgePort),
 		fmt.Sprintf("TCP:127.0.0.1:%d", d.HiddenPort()),
 	}
 	return runLoggedCmd(ctx, logPath, "socat", args)
 }
+
+func (d *Database) SocatLogPath(outputDir string) string {
+	return filepath.Join(outputDir, fmt.Sprintf("%s_socat.log", d.Name))
+}
+
+func (d *Database) HiddenPort() int { return d.BridgePort + HiddenPortOffset }
 
 // Validate checks that required fields are present, ports are valid,
 // and the DB system is supported.
@@ -290,10 +284,13 @@ func (d *Database) Validate() error {
 
 	hidden := d.HiddenPort()
 	if hidden <= 0 || hidden > PortUpperBound {
-		add(fmt.Sprintf("hidden port must be between 1 and %d for %s (got %d). use bridge port between 1-%d", PortUpperBound, d.Name, hidden, BridgePortUpperBound))
+		add(fmt.Sprintf(
+			"hidden_port must be between 1 and %d for %s (got %d). Please use bridge_port between 1-%d",
+			PortUpperBound, d.Name, hidden, BridgePortUpperBound,
+		))
 	}
 	if hidden == d.BridgePort || hidden == d.AdminerPort {
-		add(fmt.Sprintf("hidden port (%d) conflicts with bridge or adminer port for %s", hidden, d.Name))
+		add(fmt.Sprintf("hidden_port (%d) conflicts with bridge_port or adminer_port for %s", hidden, d.Name))
 	}
 
 	// Check ports are available on the host
@@ -303,7 +300,7 @@ func (d *Database) Validate() error {
 	}{
 		{d.BridgePort, "bridge_port"},
 		{d.AdminerPort, "adminer_port"},
-		{hidden, "hidden port"},
+		{hidden, "hidden_port"},
 	} {
 		if !isPortAvailable(p.port) {
 			add(fmt.Sprintf("%s %d is already in use on host for %s", p.name, p.port, d.Name))
