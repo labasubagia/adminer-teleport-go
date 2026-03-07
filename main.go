@@ -130,7 +130,33 @@ func runOrchestrator(ctx context.Context, selected []Database, outputDir string)
 		}
 	}()
 
-	g, groupCtx := errgroup.WithContext(ctx)
+	// Create a cancellable child context and an errgroup bound to it.
+	//
+	// Purpose and flow:
+	// - `childCtx` is derived from the parent `ctx` (which listens for
+	//   OS signals). We cancel `childCtx` explicitly via `cancelGroup()`
+	//   when any tunnel subprocess exits (successfully or with error).
+	// - `errgroup.WithContext(childCtx)` returns `groupCtx` which is
+	//   passed to each goroutine; `groupCtx` is cancelled when either:
+	//     * `cancelGroup()` is called manually, or
+	//     * any goroutine returns a non-nil error (errgroup cancels it),
+	//     * the parent `ctx` is cancelled (OS signal).
+	// - Subprocesses are started with `exec.CommandContext(groupCtx, ...)`
+	//   inside `runLoggedCmd`. When `groupCtx` is cancelled, the
+	//   underlying command receives a kill and exits, allowing the
+	//   goroutines to return and `errgroup` to proceed to shutdown.
+	//
+	// Why we cancel on any tunnel exit:
+	// The intended behavior is that the orchestrator should stop if
+	// any essential tunnel (tsh or socat) exits. Calling `cancelGroup()`
+	// from the tunnel goroutine ensures the other tunnels are torn
+	// down and the Compose stack is brought down in the deferred cleanup.
+	// This keeps the system in a deterministic state instead of leaving
+	// half-open tunnels or running containers.
+	childCtx, cancelGroup := context.WithCancel(ctx)
+	defer cancelGroup()
+
+	g, groupCtx := errgroup.WithContext(childCtx)
 
 	for _, db := range selected {
 		dbRef := db
@@ -142,11 +168,16 @@ func runOrchestrator(ctx context.Context, selected []Database, outputDir string)
 				args = append(args, "--db-name="+dbRef.DBName)
 			}
 			args = append(args, dbRef.Cluster)
-			err = runLoggedCmd(groupCtx, outputDir, dbRef.Name+"_tsh", "tsh", args)
+			// Run the tsh tunnel. If this process exits for any reason
+			// (error or normal exit) we cancel the group so the
+			// other tunnels and subprocesses are stopped and the
+			// orchestrator can perform cleanup.
+			err := runLoggedCmd(groupCtx, outputDir, dbRef.Name+"_tsh", "tsh", args)
 			if err != nil {
 				fmt.Printf("❌ [%s] TSH error: %v\n", dbRef.Name, err)
 				fmt.Printf("   Check %s.log for details\n", filepath.Join(outputDir, dbRef.Name+"_tsh"))
 			}
+			cancelGroup()
 			return err
 		})
 
@@ -157,24 +188,25 @@ func runOrchestrator(ctx context.Context, selected []Database, outputDir string)
 				fmt.Sprintf("TCP:127.0.0.1:%d", dbRef.HiddenPort()),
 			}
 			fmt.Printf("🔗 [%s] -> %s\n", dbRef.Name, dbRef.AdminerURL())
-			err = runLoggedCmd(groupCtx, outputDir, dbRef.Name+"_socat", "socat", args)
+			// Run the socat bridge. As with the tsh tunnel, cancel the
+			// group when this subprocess exits so the whole orchestrator
+			// shuts down and Compose is brought down in the defer.
+			err := runLoggedCmd(groupCtx, outputDir, dbRef.Name+"_socat", "socat", args)
 			if err != nil {
 				fmt.Printf("❌ [%s] SOCAT error: %v\n", dbRef.Name, err)
 				fmt.Printf("   Check %s.log for details\n", filepath.Join(outputDir, dbRef.Name+"_socat"))
 			}
+			cancelGroup()
 			return err
 		})
 	}
-	err = g.Wait()
-	if err != nil {
-		return fmt.Errorf("error in goroutines: %w", err)
-	}
 
-	fmt.Println("\n✅ All tunnels closed gracefully.")
-	return nil
+	return g.Wait()
 }
 
 func runLoggedCmd(ctx context.Context, dir, logName, bin string, args []string) (err error) {
+	// Open a log file for the subprocess. Output (stdout/stderr) is
+	// streamed to this file for debugging.
 	f, _ := os.OpenFile(filepath.Join(dir, logName+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	defer func() {
 		err = f.Close()
@@ -183,6 +215,9 @@ func runLoggedCmd(ctx context.Context, dir, logName, bin string, args []string) 
 		}
 	}()
 
+	// Use exec.CommandContext so the started subprocess is tied to the
+	// provided context: canceling the context will send a kill to the
+	// child process, ensuring clean shutdown when we cancel `groupCtx`.
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdout = f
 	cmd.Stderr = f
