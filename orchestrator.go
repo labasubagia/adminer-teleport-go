@@ -11,7 +11,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func runOrchestrator(ctx context.Context, selected []Database, outputDir string) (err error) {
+func runOrchestrator(ctx context.Context, configPath string, selectedNames []string, outputDir string) (err error) {
+	selected, err := LoadSelectedDatabases(configPath, selectedNames)
+	if err != nil {
+		return err
+	}
+
 	composeBase, err := detectComposeCmd()
 	if err != nil {
 		return fmt.Errorf("failed to detect compose command: %w", err)
