@@ -12,6 +12,11 @@ import (
 )
 
 func runOrchestrator(ctx context.Context, configPath string, selectedNames []string, outputDir string) (err error) {
+	// Verify external prerequisites first
+	if err := CheckPrerequisites(); err != nil {
+		return err
+	}
+
 	selected, err := LoadSelectedDatabases(configPath, selectedNames)
 	if err != nil {
 		return err
