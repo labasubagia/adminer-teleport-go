@@ -127,6 +127,17 @@ func (d *Database) Validate() error {
 	if hidden == d.BridgePort || hidden == d.AdminerPort {
 		return fmt.Errorf("hidden port (%d) conflicts with bridge or adminer port for %s", hidden, d.Name)
 	}
+
+	// Check ports are available on the host
+	if !isPortAvailable(d.BridgePort) {
+		return fmt.Errorf("bridge_port %d is already in use on host for %s", d.BridgePort, d.Name)
+	}
+	if !isPortAvailable(d.AdminerPort) {
+		return fmt.Errorf("adminer_port %d is already in use on host for %s", d.AdminerPort, d.Name)
+	}
+	if !isPortAvailable(hidden) {
+		return fmt.Errorf("hidden port %d is already in use on host for %s", hidden, d.Name)
+	}
 	return nil
 }
 
