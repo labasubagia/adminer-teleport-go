@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type ErrValidation struct {
@@ -29,13 +31,43 @@ type Settings struct {
 	Databases []Database `json:"databases"`
 }
 
+func LoadSettings(configPath string) (*Settings, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	var s Settings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config JSON: %w", err)
+	}
+	err = s.Validate()
+	if err != nil {
+		if ev, ok := err.(*ErrValidation); ok {
+			return nil, fmt.Errorf("config validation error: %s", fmt.Errorf("\n\t- %s", strings.Join(ev.Errs, "\n\t- ")))
+		}
+		return nil, fmt.Errorf("config validation error: %w", err)
+	}
+	return &s, nil
+}
+
 func (s *Settings) Validate() error {
-	var ve ErrValidation
-	add := func(s string) { ve.Add(s) }
+	var ev ErrValidation
+	add := func(s string) { ev.Add(s) }
 
 	// Basic validation for the settings struct itself
 	if len(s.Databases) == 0 {
 		add("at least one database configuration is required")
+	}
+
+	// Validate each database config
+	for _, db := range s.Databases {
+		if err := db.Validate(); err != nil {
+			if ev, ok := err.(*ErrValidation); ok {
+				add(fmt.Sprintf("%s: %s", db.Name, fmt.Sprintf("\n\t\t- %s", strings.Join(ev.Errs, "\n\t\t- "))))
+			} else {
+				add(fmt.Sprintf("%s: %v", db.Name, err))
+			}
+		}
 	}
 
 	// Check for port duplication across selected databases (bridge, adminer, hidden)
@@ -52,11 +84,73 @@ func (s *Settings) Validate() error {
 		}
 	}
 
-	if len(ve.Errs) > 0 {
-		return &ve
+	if len(ev.Errs) > 0 {
+		return &ev
 	}
 
 	return nil
+}
+
+// GenerateComposeFile generates a Docker Compose YAML file at the given path
+// that contains one service entry per provided Database.
+//
+// It builds a "services" mapping by using each Database's ServiceName() as the
+// key and ToComposeService() as the service specification, marshals that map
+// to YAML and writes it to path. Any error during marshaling or writing is
+// returned.
+//
+// Rationale for generating one service per cluster:
+//   - Adminer cannot be logged into multiple clusters simultaneously because it
+//     relies on PHP sessions; a single Adminer instance cannot maintain separate
+//     session state for multiple clusters.
+//   - Using one Adminer instance for all clusters forces users to repeatedly
+//     log in and out when switching clusters, and prevents accessing multiple
+//     cluster pods at the same time.
+//   - Supporting multiple concurrent cluster sessions in a single Adminer would
+//     require modifying the Adminer codebase to handle multi-session state.
+//   - The resource overhead of running one Adminer service per cluster is
+//     typically insignificant on modern hardware.
+func (s *Settings) GenerateComposeFile(dbs []Database, path string) error {
+	services := make(map[string]any)
+	for _, db := range dbs {
+		services[db.ServiceName()] = db.ToComposeService()
+	}
+	composeData, err := yaml.Marshal(map[string]any{"services": services})
+	if err != nil {
+		return fmt.Errorf("failed to marshal compose data: %w", err)
+	}
+	err = os.WriteFile(path, composeData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write compose file: %w", err)
+	}
+	return nil
+}
+
+func (s *Settings) FilterDatabases(selectedNames []string) ([]Database, error) {
+
+	if len(selectedNames) == 0 {
+		return s.Databases, nil
+	}
+
+	var selected []Database
+	var missing []string
+	lookup := make(map[string]Database, len(s.Databases))
+	for _, d := range s.Databases {
+		lookup[d.Name] = d
+	}
+	for _, name := range selectedNames {
+		if db, ok := lookup[name]; ok {
+			selected = append(selected, db)
+		} else {
+			missing = append(missing, name)
+		}
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("the following database names were not found in config: %s", strings.Join(missing, ", "))
+	}
+
+	return selected, nil
 }
 
 type Database struct {
@@ -113,8 +207,22 @@ func (d *Database) SocatLogPath() string {
 	return filepath.Join(DefaultOutputDir, fmt.Sprintf("%s_socat.log", d.Name))
 }
 
-// RunProxyTunnel and RunSocat delegate to runLoggedCmd.
-// If outputDir is non-empty it will be used for the log path instead of DefaultOutputDir.
+// RunProxyTunnel starts a tsh proxy tunnel for the database and logs tsh output.
+//
+// It launches "tsh proxy db --tunnel ..." (including --port set to the database's hidden port,
+// --db-user and, when provided, --db-name) and writes logs to the database's proxy tunnel log path
+// or to outputDir when a non-empty path is supplied.
+//
+// Why use a proxy tunnel:
+//   - Directly using the proxy can require establishing SSL connections to the database, which is tedious;
+//     the tunnel simplifies client connectivity.
+//   - A hidden port is used because Adminer cannot access the loopback interface directly (127.0.0.1);
+//
+// /    that loopback access is mapped via socat to expose the tunnel to Adminer.
+//   - Some database drivers (e.g., Postgres) require an explicit database name argument (--db-name), so
+//     DBName is forwarded when set.
+//
+// Returns an error if starting the tsh process or writing logs fails.
 func (d *Database) RunProxyTunnel(ctx context.Context, outputDir string) error {
 	logPath := d.ProxyTunnelLogPath()
 	if strings.TrimSpace(outputDir) != "" {
@@ -128,6 +236,15 @@ func (d *Database) RunProxyTunnel(ctx context.Context, outputDir string) error {
 	return runLoggedCmd(ctx, logPath, "tsh", args)
 }
 
+// RunSocat starts a socat process that listens on the database BridgePort on 0.0.0.0
+// and forwards all incoming TCP connections to the database's local hidden port (127.0.0.1:<hidden>).
+// This enables tools running in the adminer/container network to reach services bound to the host loopback.
+//
+// Why socat is used:
+//   - The adminer network cannot access the host's 127.0.0.1 loopback directly (tsh enforces loopback isolation).
+//   - Adminer needs an address reachable from containers (e.g. host.containers.internal -> 0.0.0.0).
+//   - socat bridges that gap by listening on 0.0.0.0 and forwarding requests to 127.0.0.1, allowing containerized
+//     clients to access services bound to the host loopback.
 func (d *Database) RunSocat(ctx context.Context, outputDir string) error {
 	logPath := d.SocatLogPath()
 	if strings.TrimSpace(outputDir) != "" {
@@ -143,8 +260,8 @@ func (d *Database) RunSocat(ctx context.Context, outputDir string) error {
 // Validate checks that required fields are present, ports are valid,
 // and the DB system is supported.
 func (d *Database) Validate() error {
-	var ve ErrValidation
-	add := func(s string) { ve.Add(s) }
+	var ev ErrValidation
+	add := func(s string) { ev.Add(s) }
 
 	if strings.TrimSpace(d.Name) == "" {
 		add("name is required")
@@ -193,72 +310,8 @@ func (d *Database) Validate() error {
 		}
 	}
 
-	if len(ve.Errs) > 0 {
-		return &ve
+	if len(ev.Errs) > 0 {
+		return &ev
 	}
 	return nil
-}
-
-// LoadSelectedDatabases reads the JSON config at configPath, unmarshals it,
-// filters databases according to selectedNames (if non-empty) and validates
-// each selected database. Returns the selected slice or an aggregated error.
-func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Database, error) {
-
-	settings, err := loadSettings(configPath)
-	if err != nil {
-		return nil, err
-	}
-
-	var selected []Database
-	var missing []string
-	if len(selectedNames) > 0 {
-		lookup := make(map[string]Database, len(settings.Databases))
-		for _, d := range settings.Databases {
-			lookup[d.Name] = d
-		}
-		for _, name := range selectedNames {
-			if db, ok := lookup[name]; ok {
-				selected = append(selected, db)
-			} else {
-				missing = append(missing, name)
-			}
-		}
-	} else {
-		selected = settings.Databases
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("the following database names were not found in config: %s", strings.Join(missing, ", "))
-	}
-
-	var errs []string
-	for i, db := range selected {
-		if err := db.Validate(); err != nil {
-			if ev, ok := err.(*ErrValidation); ok {
-				errs = append(errs, fmt.Sprintf("json data database-%d %s: \n\t- %s", i, db.Name, strings.Join(ev.Errs, "\n\t- ")))
-			} else {
-				errs = append(errs, fmt.Sprintf("json data database-%d %s: %s", i, db.Name, err.Error()))
-			}
-		}
-	}
-
-	return selected, nil
-}
-
-func loadSettings(configPath string) (*Settings, error) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-	var s Settings
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config JSON: %w", err)
-	}
-	err = s.Validate()
-	if err != nil {
-		if ev, ok := err.(*ErrValidation); ok {
-			return nil, fmt.Errorf("config validation error: \n\t- %s", strings.Join(ev.Errs, "\n\t- "))
-		}
-		return nil, fmt.Errorf("config validation error: %w", err)
-	}
-	return &s, nil
 }
