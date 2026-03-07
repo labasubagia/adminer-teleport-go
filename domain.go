@@ -191,7 +191,7 @@ func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Databas
 		}
 	}
 	if len(errs) > 0 {
-		return nil, fmt.Errorf("%s", strings.Join(errs, "; "))
+		return nil, fmt.Errorf("\n- %s", strings.Join(errs, "\n- "))
 	}
 	return selected, nil
 }

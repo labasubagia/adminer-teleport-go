@@ -36,7 +36,7 @@ func CheckPrerequisites() error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("%s", strings.Join(errs, "; "))
+		return fmt.Errorf("\n- %s", strings.Join(errs, "\n- "))
 	}
 	return nil
 }
