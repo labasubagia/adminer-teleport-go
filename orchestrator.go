@@ -66,30 +66,45 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 		}
 	}()
 
+	// Create a cancellable child context used by all worker goroutines.
+	// Calling cancelGroup() cancels childCtx and signals all workers
+	// (proxy tunnels and socat processes) to stop. We defer it so that
+	// when runOrchestrator returns (normal exit or error) all external
+	// processes are asked to terminate and logs/cleanup can run.
 	childCtx, cancelGroup := context.WithCancel(ctx)
 	defer cancelGroup()
 
+	// Create an errgroup that derives from the child context. The group's
+	// groupCtx is cancelled when any goroutine returns a non-nil error.
+	// Note: each goroutine below also calls cancelGroup() when it exits
+	// (deferred inside the goroutine). That means if any single process
+	// (tunnel or socat) stops — whether due to an error or normal exit —
+	// we cancel the shared context and the entire application stops the
+	// remaining processes. This implements the behavior: when one of the
+	// processes stops, the whole app will be stopped. It also ensures
+	// that when the app is stopped, all tunnels and socat instances are
+	// killed.
 	g, groupCtx := errgroup.WithContext(childCtx)
 
 	for _, db := range selected {
 		g.Go(func() error {
+			defer cancelGroup()
 			err := db.RunProxyTunnel(groupCtx, outputDir)
 			if err != nil {
 				fmt.Printf("❌ [%s] TSH error: %v\n", db.Name, err)
 				fmt.Printf("   Check %s for details\n", db.ProxyTunnelLogPath())
 			}
-			cancelGroup()
 			return err
 		})
 
 		g.Go(func() error {
+			defer cancelGroup()
 			fmt.Printf("🔗 [%s] -> %s\n", db.Name, db.AdminerURL())
 			err := db.RunSocat(groupCtx, outputDir)
 			if err != nil {
 				fmt.Printf("❌ [%s] SOCAT error: %v\n", db.Name, err)
 				fmt.Printf("   Check %s for details\n", db.SocatLogPath())
 			}
-			cancelGroup()
 			return err
 		})
 	}
