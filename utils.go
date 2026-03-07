@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"os"
 )
 
 // isPortAvailable attempts to bind to the given TCP port on loopback and
@@ -24,4 +25,11 @@ func isPortAvailable(port int) bool {
 		return true
 	}
 	return false
+}
+
+func getEnv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return fallback
 }

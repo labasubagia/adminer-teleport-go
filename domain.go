@@ -11,6 +11,14 @@ import (
 	"strings"
 )
 
+type ErrValidation struct {
+	Errs []string
+}
+
+func (e *ErrValidation) Error() string {
+	return strings.Join(e.Errs, "; ")
+}
+
 var driverMap = map[string]string{"pgsql": "pgsql", "mysql": "server"}
 
 type Settings struct {
@@ -92,51 +100,54 @@ func (d *Database) RunSocat(ctx context.Context, outputDir string) error {
 // Validate checks that required fields are present, ports are valid,
 // and the DB system is supported.
 func (d *Database) Validate() error {
-	portUpperBound := 65535
-	bridePortUpperBound := portUpperBound - HiddenPortOffset
+
+	errs := []string{}
 
 	if strings.TrimSpace(d.Name) == "" {
-		return fmt.Errorf("name is required")
+		errs = append(errs, "name is required")
 	}
 	if strings.TrimSpace(d.Cluster) == "" {
-		return fmt.Errorf("cluster is required for %s", d.Name)
+		errs = append(errs, "cluster is required")
 	}
 	if strings.TrimSpace(d.DBSystem) == "" {
-		return fmt.Errorf("db_system is required for %s", d.Name)
+		errs = append(errs, "db_system is required")
 	}
 	if strings.TrimSpace(d.DBUser) == "" {
-		return fmt.Errorf("db_user is required for %s", d.Name)
+		errs = append(errs, "db_user is required")
 	}
 	if _, ok := driverMap[d.DBSystem]; !ok {
-		return fmt.Errorf("unsupported db_system %q for %s", d.DBSystem, d.Name)
+		errs = append(errs, fmt.Sprintf("unsupported db_system '%s'", d.DBSystem))
 	}
-	if d.BridgePort <= 0 || d.BridgePort > portUpperBound {
-		return fmt.Errorf("bridge_port must be between 1 and 65535 for %s", d.Name)
+	if d.BridgePort <= 0 || d.BridgePort > BridgePortUpperBound {
+		errs = append(errs, fmt.Sprintf("bridge_port must be between 1 and %d", BridgePortUpperBound))
 	}
-	if d.AdminerPort <= 0 || d.AdminerPort > portUpperBound {
-		return fmt.Errorf("adminer_port must be between 1 and 65535 for %s", d.Name)
+	if d.AdminerPort <= 0 || d.AdminerPort > PortUpperBound {
+		errs = append(errs, fmt.Sprintf("adminer_port must be between 1 and %d", PortUpperBound))
 	}
 	if d.AdminerPort == d.BridgePort {
-		return fmt.Errorf("adminer_port must differ from bridge_port for %s", d.Name)
+		errs = append(errs, fmt.Sprintf("adminer_port must differ from bridge_port for %s", d.Name))
 	}
 	// Validate hidden port (bridge + offset)
 	hidden := d.HiddenPort()
-	if hidden <= 0 || hidden > portUpperBound {
-		return fmt.Errorf("hidden port must be between 1 and 65535m for %s (got %d). use bridge port between 1-%d", d.Name, hidden, bridePortUpperBound)
+	if hidden <= 0 || hidden > PortUpperBound {
+		errs = append(errs, fmt.Sprintf("hidden port must be between 1 and %d for %s (got %d). use bridge port between 1-%d", PortUpperBound, d.Name, hidden, BridgePortUpperBound))
 	}
 	if hidden == d.BridgePort || hidden == d.AdminerPort {
-		return fmt.Errorf("hidden port (%d) conflicts with bridge or adminer port for %s", hidden, d.Name)
+		errs = append(errs, fmt.Sprintf("hidden port (%d) conflicts with bridge or adminer port for %s", hidden, d.Name))
 	}
 
 	// Check ports are available on the host
 	if !isPortAvailable(d.BridgePort) {
-		return fmt.Errorf("bridge_port %d is already in use on host for %s", d.BridgePort, d.Name)
+		errs = append(errs, fmt.Sprintf("bridge_port %d is already in use on host for %s", d.BridgePort, d.Name))
 	}
 	if !isPortAvailable(d.AdminerPort) {
-		return fmt.Errorf("adminer_port %d is already in use on host for %s", d.AdminerPort, d.Name)
+		errs = append(errs, fmt.Sprintf("adminer_port %d is already in use on host for %s", d.AdminerPort, d.Name))
 	}
 	if !isPortAvailable(hidden) {
-		return fmt.Errorf("hidden port %d is already in use on host for %s", hidden, d.Name)
+		errs = append(errs, fmt.Sprintf("hidden port %d is already in use on host for %s", hidden, d.Name))
+	}
+	if len(errs) > 0 {
+		return &ErrValidation{Errs: errs}
 	}
 	return nil
 }
@@ -177,9 +188,16 @@ func LoadSelectedDatabases(configPath string, selectedNames []string) ([]Databas
 	}
 
 	var errs []string
-	for _, db := range selected {
+	for i, db := range selected {
 		if err := db.Validate(); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %s", db.Name, err.Error()))
+			errVal, ok := err.(*ErrValidation)
+			var errMsg string
+			if ok {
+				errMsg = fmt.Sprintf("\n\t- %s", strings.Join(errVal.Errs, "\n\t- "))
+			} else {
+				errMsg = err.Error()
+			}
+			errs = append(errs, fmt.Sprintf("json data database-%d %s: %s", i, db.Name, errMsg))
 		}
 	}
 
