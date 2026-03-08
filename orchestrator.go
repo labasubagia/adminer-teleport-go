@@ -43,11 +43,6 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 		return err
 	}
 
-	composeBase, err := detectComposeCmd()
-	if err != nil {
-		return fmt.Errorf("failed to detect compose command: %w", err)
-	}
-
 	// Clear output directory before starting.
 	err = os.RemoveAll(outputDir)
 	if err != nil {
@@ -58,12 +53,17 @@ func runOrchestrator(ctx context.Context, configPath string, selectedNames []str
 		return fmt.Errorf("failed to create output dir: %w", err)
 	}
 
-	fmt.Printf("🚀 Starting Adminer via %s...\n", strings.Join(composeBase, " "))
-
 	// Bring up the compose services. We defer bringing them down so that if any error occurs
 	// later on, we still attempt to clean up the compose services. Note that if composeUpCmd
 	// fails, we return immediately and the deferred composeDownCmd is a no-op since the
 	// services never started.
+	composeBase, err := detectComposeCmd()
+	if err != nil {
+		return fmt.Errorf("failed to detect compose command: %w", err)
+	}
+
+	fmt.Printf("🚀 Starting Adminer via %s...\n", strings.Join(composeBase, " "))
+
 	if err := composeUpCmd(composeBase, ComposeFile); err != nil {
 		return err
 	}
