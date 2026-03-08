@@ -28,59 +28,59 @@ This tool streamlines database access by:
 
 2. Configure your databases in `settings.json`.
 
-Standalone Adminer (each database gets its own Adminer container):
+    Standalone Adminer (each database gets its own Adminer container):
 
-```json
-{
-  "databases": [
+    ```json
     {
-    "name": "db_standalone_1",
-    "cluster": "teleport-cluster-name-a",
-      "db_system": "pgsql",
-      "db_user": "alice",
-      "db_name": "app_db",
-      "bridge_port": 5433,
-      "adminer_port": 8081
-    },
-    {
-      "name": "db_standalone_2",
-      "cluster": "teleport-cluster-name-b",
-      "db_system": "mysql",
-      "db_user": "bob",
-      "db_name": "shop_db",
-      "bridge_port": 5434,
-      "adminer_port": 8082
+      "databases": [
+        {
+        "name": "db_standalone_1",
+        "cluster": "teleport-cluster-name-a",
+          "db_system": "pgsql",
+          "db_user": "alice",
+          "db_name": "app_db",
+          "bridge_port": 5433,
+          "adminer_port": 8081
+        },
+        {
+          "name": "db_standalone_2",
+          "cluster": "teleport-cluster-name-b",
+          "db_system": "mysql",
+          "db_user": "bob",
+          "db_name": "shop_db",
+          "bridge_port": 5434,
+          "adminer_port": 8082
+        }
+      ]
     }
-  ]
-}
-```
+    ```
 
-Shared Adminer (multiple databases share the same Adminer port; requires re-login when switching):
+    Shared Adminer (multiple databases share the same Adminer port; requires re-login when switching):
 
-```json
-{
-  "databases": [
+    ```json
     {
-      "name": "db_shared_a",
-      "cluster": "teleport-cluster-name-a",
-      "db_system": "pgsql",
-      "db_user": "carol",
-      "db_name": "analytics",
-      "bridge_port": 5435,
-      "adminer_port": 8083
-    },
-    {
-      "name": "db_shared_b",
-      "cluster": "teleport-cluster-name-b",
-      "db_system": "pgsql",
-      "db_user": "dave",
-      "db_name": "metrics",
-      "bridge_port": 5436,
-      "adminer_port": 8083
+      "databases": [
+        {
+          "name": "db_shared_a",
+          "cluster": "teleport-cluster-name-a",
+          "db_system": "pgsql",
+          "db_user": "carol",
+          "db_name": "analytics",
+          "bridge_port": 5435,
+          "adminer_port": 8083
+        },
+        {
+          "name": "db_shared_b",
+          "cluster": "teleport-cluster-name-b",
+          "db_system": "pgsql",
+          "db_user": "dave",
+          "db_name": "metrics",
+          "bridge_port": 5436,
+          "adminer_port": 8083
+        }
+      ]
     }
-  ]
-}
-```
+    ```
 
 ### Configuration Fields
 
