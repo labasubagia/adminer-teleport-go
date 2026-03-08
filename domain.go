@@ -40,7 +40,7 @@ func LoadSettings(configPath string) (*Settings, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config JSON: %w", err)
 	}
-	err = s.Validate()
+	err = s.validate()
 	if err != nil {
 		if ev, ok := err.(*ErrValidation); ok {
 			return nil, fmt.Errorf("config validation error: %s", fmt.Errorf("\n\t- %s", strings.Join(ev.Errs, "\n\t- ")))
@@ -50,16 +50,14 @@ func LoadSettings(configPath string) (*Settings, error) {
 	return &s, nil
 }
 
-func (s *Settings) Validate() error {
+func (s *Settings) validate() error {
 	var ev ErrValidation
 	add := func(s string) { ev.Add(s) }
 
-	// Basic validation for the settings struct itself
 	if len(s.Databases) == 0 {
 		add("at least one database configuration is required")
 	}
 
-	// Validate each database config
 	for _, db := range s.Databases {
 		if err := db.Validate(); err != nil {
 			if ev, ok := err.(*ErrValidation); ok {
@@ -70,17 +68,49 @@ func (s *Settings) Validate() error {
 		}
 	}
 
-	// Check for port duplication across selected databases (bridge, adminer, hidden)
-	portOwners := make(map[int][]string)
-	for _, db := range s.Databases {
-		portOwners[db.BridgePort] = append(portOwners[db.BridgePort], fmt.Sprintf("%s(bridge)", db.Name))
-		portOwners[db.AdminerPort] = append(portOwners[db.AdminerPort], fmt.Sprintf("%s(adminer)", db.Name))
-		hidden := db.HiddenPort()
-		portOwners[hidden] = append(portOwners[hidden], fmt.Sprintf("%s(hidden)", db.Name))
+	if err := s.checkDbPorts(); err != nil {
+		if ev, ok := err.(*ErrValidation); ok {
+			add(fmt.Sprintf("port configuration errors: %s", fmt.Sprintf("\n\t\t- %s", strings.Join(ev.Errs, "\n\t\t- "))))
+		} else {
+			add(fmt.Sprintf("port configuration error: %v", err))
+		}
 	}
-	for port, owners := range portOwners {
+
+	if len(ev.Errs) > 0 {
+		return &ev
+	}
+
+	return nil
+}
+
+// checkDbPorts checks for port conflicts across all databases in the settings.
+//
+// Tunnel port needs to be unique across all databases,
+// and must not conflict with any Adminer ports.
+//
+// Duplicates adminer port means one adminer instance can be used for multiple databases,
+// adminer port duplicates are allowerd and require re-login when switching between databases.
+func (s *Settings) checkDbPorts() error {
+	var ev ErrValidation
+	add := func(s string) { ev.Add(s) }
+
+	tunnelPortMap := make(map[int][]string)
+	adminerPortMap := make(map[int]struct{})
+	for _, db := range s.Databases {
+		tunnelPortMap[db.BridgePort] = append(tunnelPortMap[db.BridgePort], fmt.Sprintf("%s(bridge)", db.Name))
+		hidden := db.HiddenPort()
+		tunnelPortMap[hidden] = append(tunnelPortMap[hidden], fmt.Sprintf("%s(hidden)", db.Name))
+
+		adminerPortMap[db.AdminerPort] = struct{}{}
+	}
+	// Check for any ports that are used by multiple databases or that conflict with Adminer ports.
+	for port, owners := range tunnelPortMap {
 		if len(owners) > 1 {
 			add(fmt.Sprintf("port %d is used by multiple databases: %s", port, strings.Join(owners, ", ")))
+		}
+
+		if _, ok := adminerPortMap[port]; ok {
+			add(fmt.Sprintf("port %d is used as an Adminer port", port))
 		}
 	}
 
@@ -92,29 +122,42 @@ func (s *Settings) Validate() error {
 }
 
 // GenerateComposeFile generates a Docker Compose YAML file at the given path
-// that contains one service entry per provided Database.
+// containing service entries for the provided databases.
 //
-// It builds a "services" mapping by using each Database's ServiceName() as the
-// key and ToComposeService() as the service specification, marshals that map
-// to YAML and writes it to path. Any error during marshaling or writing is
-// returned.
+// Databases that share the same Adminer port will be served by a single
+// Adminer instance (service key "adminer_<port>") — this allows Adminer to be
+// reused but requires re-login when switching between databases.
 //
-// Rationale for generating one service per cluster:
-//   - Adminer cannot be logged into multiple clusters simultaneously because it
-//     relies on PHP sessions; a single Adminer instance cannot maintain separate
-//     session state for multiple clusters.
-//   - Using one Adminer instance for all clusters forces users to repeatedly
-//     log in and out when switching clusters, and prevents accessing multiple
-//     cluster pods at the same time.
-//   - Supporting multiple concurrent cluster sessions in a single Adminer would
-//     require modifying the Adminer codebase to handle multi-session state.
-//   - The resource overhead of running one Adminer service per cluster is
-//     typically insignificant on modern hardware.
+// Databases that use unique Adminer ports get their own Adminer service (service key
+// from Database.ServiceName()); standalone Adminer instances are used to
+// allow concurrent login sessions to multiple database clusters.
 func (s *Settings) GenerateComposeFile(dbs []Database, path string) error {
 	services := make(map[string]any)
+
+	// To allow multiple databases to share the same Adminer instance when they use the same Adminer port,
+	// but need to re-login when switching between clusters,
+	// it is created when multiple databases share the same adminer port,
+	// otherwise each database will have its own adminer instance.
+	sharedAdminer := make(map[int]Database)
 	for _, db := range dbs {
+		if _, ok := sharedAdminer[db.AdminerPort]; !ok {
+			sharedAdminer[db.AdminerPort] = db
+		}
+	}
+	for port, db := range sharedAdminer {
+		services[fmt.Sprintf("adminer_%d", port)] = db.ToComposeService()
+	}
+
+	// Standalone adminer services are created for each unique Adminer port across all databases.
+	// This allows multiple databases to share an Adminer instance when they use the same Adminer port,
+	// and allows concurrent login sessions
+	for _, db := range dbs {
+		if _, ok := sharedAdminer[db.AdminerPort]; ok {
+			continue
+		}
 		services[db.ServiceName()] = db.ToComposeService()
 	}
+
 	composeData, err := yaml.Marshal(map[string]any{"services": services})
 	if err != nil {
 		return fmt.Errorf("failed to marshal compose data: %w", err)
@@ -299,7 +342,6 @@ func (d *Database) Validate() error {
 		name string
 	}{
 		{d.BridgePort, "bridge_port"},
-		{d.AdminerPort, "adminer_port"},
 		{hidden, "hidden_port"},
 	} {
 		if !isPortAvailable(p.port) {
