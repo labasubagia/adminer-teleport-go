@@ -9,6 +9,7 @@ This tool streamlines database access by:
 - Automatically generating Docker Compose configurations
 - Deploying Adminer containers for each database
 - Opening browser windows to pre-configured Adminer instances
+  - Re-using a single Adminer instance for multiple databases when they share the same `adminer_port`
 
 ## Prerequisites
 
@@ -25,22 +26,61 @@ This tool streamlines database access by:
    cp settings.example.json settings.json
    ```
 
-2. Configure your databases in `settings.json`:
-   ```json
-   {
-     "databases": [
-       {
-         "name": "my_db",
-         "cluster": "teleport-cluster-name",
-         "db_system": "pgsql",
-         "db_user": "username",
-         "db_name": "database_name",
-         "bridge_port": 5433,
-         "adminer_port": 8081
-       }
-     ]
-   }
-   ```
+2. Configure your databases in `settings.json`.
+
+Standalone Adminer (each database gets its own Adminer container):
+
+```json
+{
+  "databases": [
+    {
+    "name": "db_standalone_1",
+    "cluster": "teleport-cluster-name-a",
+      "db_system": "pgsql",
+      "db_user": "alice",
+      "db_name": "app_db",
+      "bridge_port": 5433,
+      "adminer_port": 8081
+    },
+    {
+      "name": "db_standalone_2",
+      "cluster": "teleport-cluster-name-b",
+      "db_system": "mysql",
+      "db_user": "bob",
+      "db_name": "shop_db",
+      "bridge_port": 5434,
+      "adminer_port": 8082
+    }
+  ]
+}
+```
+
+Shared Adminer (multiple databases share the same Adminer port; requires re-login when switching):
+
+```json
+{
+  "databases": [
+    {
+      "name": "db_shared_a",
+      "cluster": "teleport-cluster-name-a",
+      "db_system": "pgsql",
+      "db_user": "carol",
+      "db_name": "analytics",
+      "bridge_port": 5435,
+      "adminer_port": 8083
+    },
+    {
+      "name": "db_shared_b",
+      "cluster": "teleport-cluster-name-b",
+      "db_system": "pgsql",
+      "db_user": "dave",
+      "db_name": "metrics",
+      "bridge_port": 5436,
+      "adminer_port": 8083
+    }
+  ]
+}
+```
 
 ### Configuration Fields
 
@@ -54,6 +94,9 @@ This tool streamlines database access by:
 
 **Optional fields:**
 - `db_name`: Specific database name to connect to
+
+**Adminer port behavior:**
+- `adminer_port`: When multiple database entries use the same `adminer_port`, the tool will generate a single Adminer service (named `adminer_<port>`) and those databases will share that Adminer instance. Sharing an Adminer instance requires re-login when switching between databases. If each database uses a unique `adminer_port`, each gets its own Adminer container allowing concurrent, separate login sessions.
 
 ## Usage
 
@@ -90,7 +133,7 @@ go build -o adminer-teleport
 2. Reads database configurations from `settings.json`
 3. Generates a `compose.yml` file with Adminer services
 4. Starts Teleport proxy connections using `tsh proxy db`
-5. Launches Docker containers for each Adminer instance
+5. Launches Docker containers for Adminer instances. Databases that share the same `adminer_port` will be served by a single Adminer service (service key `adminer_<port>`). This allows Adminer to be reused but requires re-login when switching between databases. Databases with unique `adminer_port` values get standalone Adminer services for concurrent login sessions.
 6. Opens browser windows to Adminer interfaces with pre-filled connection details
 7. Monitors for interrupt signals (Ctrl+C) and cleans up resources
 
