@@ -7,7 +7,10 @@ import (
 	"os/exec"
 )
 
-// runLoggedCmd executes the specified command with arguments, redirecting stdout and stderr to a log file at logPath.
+// runLoggedCmd executes an external process while capturing its stdout/stderr to a persistent log file.
+// The primary purpose is operational observability and post-mortem debugging: having a single, durable
+// log for each invocation makes it much easier to inspect failures that occur in CI, automation, or
+// long-running admin tasks, and ensures logs survive process termination and context cancellation.
 func runLoggedCmd(ctx context.Context, logPath, bin string, args []string) (err error) {
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
@@ -26,14 +29,20 @@ func runLoggedCmd(ctx context.Context, logPath, bin string, args []string) (err 
 	return cmd.Run()
 }
 
-// detectComposeCmd checks for the presence of common container compose tools in the system and returns the command to use.
-// It first checks for "docker compose" (the newer Docker CLI plugin), then "podman-compose", and finally "docker-compose" (the older standalone tool).
+// detectComposeCmd inspects the host to select a usable container compose tooling variant.
+// The rationale is portability and resilience: different environments (developer machines, CI runners,
+// diverse Linux distributions) may expose "podman compose", "podman-compose", "docker compose" or the
+// legacy "docker-compose". Discovering the available implementation at runtime avoids hard assumptions
+// and lets the same workflow run across heterogeneous systems.
 func detectComposeCmd() ([]string, error) {
-	if err := exec.Command("docker", "compose", "version").Run(); err == nil {
-		return []string{"docker", "compose"}, nil
+	if err := exec.Command("podman", "compose", "version").Run(); err == nil {
+		return []string{"podman", "compose"}, nil
 	}
 	if _, err := exec.LookPath("podman-compose"); err == nil {
 		return []string{"podman-compose"}, nil
+	}
+	if err := exec.Command("docker", "compose", "version").Run(); err == nil {
+		return []string{"docker", "compose"}, nil
 	}
 	if _, err := exec.LookPath("docker-compose"); err == nil {
 		return []string{"docker-compose"}, nil
