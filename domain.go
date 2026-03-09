@@ -138,21 +138,21 @@ func (s *Settings) GenerateComposeFile(dbs []Database, path string) error {
 	// but need to re-login when switching between clusters,
 	// it is created when multiple databases share the same adminer port,
 	// otherwise each database will have its own adminer instance.
-	sharedAdminer := make(map[int]Database)
+	sharedAdminer := make(map[int][]Database)
 	for _, db := range dbs {
-		if _, ok := sharedAdminer[db.AdminerPort]; !ok {
-			sharedAdminer[db.AdminerPort] = db
-		}
+		sharedAdminer[db.AdminerPort] = append(sharedAdminer[db.AdminerPort], db)
 	}
-	for port, db := range sharedAdminer {
-		services[fmt.Sprintf("adminer_%d", port)] = db.ToComposeService()
+	for port, dbList := range sharedAdminer {
+		if len(dbList) > 1 {
+			services[fmt.Sprintf("adminer_%d", port)] = dbList[0].ToComposeService()
+		}
 	}
 
 	// Standalone adminer services are created for each unique Adminer port across all databases.
 	// This allows multiple databases to share an Adminer instance when they use the same Adminer port,
 	// and allows concurrent login sessions
 	for _, db := range dbs {
-		if _, ok := sharedAdminer[db.AdminerPort]; ok {
+		if len(sharedAdminer[db.AdminerPort]) > 1 {
 			continue
 		}
 		services[db.ServiceName()] = db.ToComposeService()
