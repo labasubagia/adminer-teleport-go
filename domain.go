@@ -224,14 +224,14 @@ func (d *Database) AdminerURL() string {
 
 func (d *Database) ToComposeService() map[string]any {
 	return map[string]any{
-		"image":   "adminer",
-		"restart": "unless-stopped",
-		"ports":   []string{fmt.Sprintf("%d:8080", d.AdminerPort)},
-		"environment": map[string]any{
-			"ADMINER_DESIGN":         "hever",
-			"ADMINER_DEFAULT_SERVER": fmt.Sprintf("host.containers.internal:%d", d.BridgePort),
+		"image":       "adminer",
+		"restart":     "unless-stopped",
+		"ports":       []string{fmt.Sprintf("%d:8080", d.AdminerPort)},
+		"environment": map[string]any{"ADMINER_DESIGN": "hever"},
+		"volumes": []string{
+			"./adminer/plugins/login-password-less.php:/var/www/html/plugins/login-password-less.php",
+			"./adminer/plugins-enabled:/var/www/html/plugins-enabled:ro",
 		},
-		"volumes":     []string{"./plugins-enabled:/var/www/html/plugins-enabled:ro"},
 		"extra_hosts": []string{"host.containers.internal:host-gateway"},
 	}
 }
